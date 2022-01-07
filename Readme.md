@@ -4,7 +4,7 @@ The idea of this project is to identify beacons which are unpacked at runtime or
 To do so, I make use of the following observations:
 
 1. Malware usually calls Sleep() between callbacks which sets the treadstate to: **DelayExecution**
-2. As the malware is injected or unpacked at runtime, the callstack to Sleep() includes addresses which cannot be mapped to a module on disk as it is either not associated with a file on disk or the module has been modified at runtime.
+2. As the malware is injected or unpacked at runtime, the callstack to Sleep() includes addresses which cannot be mapped to a module on disk as the address is either not associated with a module on disk or the module has been modified at runtime.
 
 The metric to detect this kind of malware is thus:
 1. Enumerate all Threads which state is set to: **DelayExecution**
