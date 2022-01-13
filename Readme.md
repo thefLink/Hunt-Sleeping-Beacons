@@ -31,6 +31,7 @@ The metric to detect this kind of malware is thus:
  ``` 
  
 To identify the associated module of each saved instruction pointer, I make use of ```SymGetModuleInfo64```. 
-This also seems to work fine against file backed memory such as [Phantom Dll Hollowing](https://github.com/forrest-orr/phantom-dll-hollower-poc) or modified text segments.
+This also seems to work fine against ideas such as [Phantom Dll Hollowing](https://github.com/forrest-orr/phantom-dll-hollower-poc).
  
-Managed processes calling Sleep() however will always be identified due to Jitted code.
+However, module stomping will bypass this project :-)
+Managed processes calling Sleep() will always be identified due to Jitted code.
