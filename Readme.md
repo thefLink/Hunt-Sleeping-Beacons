@@ -41,7 +41,7 @@ Sample non file backed beacon:
 
 Comparing the .text segments alone would produce too many false positivies, so another metric had to be applied on top.    
 
-To identify the associated module of each saved instruction pointer, I make use of ```SymGetModuleInfo64```. To identify module stomping I walk the callstack and compare the .text segment of each module in memory with the .text segment on disk.    
+To identify the associated module of each saved instruction pointer, I make use of ```SymGetModuleInfo64```. To identify module stomping I walk the callstack and compare the .text segment of each module in the callstack with the .text segment on disk.    
 
 Tests were done using [Phantom Dll Hollowing](https://github.com/forrest-orr/phantom-dll-hollower-poc) and Cobalt Strike's module stomping.
  
