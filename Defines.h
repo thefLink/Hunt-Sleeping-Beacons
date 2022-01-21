@@ -21,7 +21,7 @@ struct DelayedProcess {
 
 };
 
-DWORD get_delayed_process(struct DelayedProcess**);
+DWORD get_delayed_processes(struct DelayedProcess**);
 
 // -------------------- 
 

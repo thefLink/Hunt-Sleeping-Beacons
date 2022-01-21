@@ -3,18 +3,12 @@
 The idea of this project is to identify beacons which are unpacked at runtime or running in the context of another process (=InMemory malware).
 To do so, I make use of the following observations:
 
-1. Malware usually calls Sleep() between callbacks which sets the treadstate to: **DelayExecution**
-2. As the malware is injected or unpacked at runtime, the callstack to Sleep() might include saved instruction pointers which cannot be mapped to a file on disk.
+1. Beacons usually call Sleep() between callbacks which sets the treadstate to: **DelayExecution**
+2. If the beacon does not make use of file backed memory, the callstack to NtDelayExecution includes unknown memory regions
+3. If the beacon uses module stomping, one of the modules in the callstack to NtDelayExecution is modified
 
-The metric to detect this kind of malware is thus:
-1. Enumerate all Threads which state is set to: **DelayExecution**
-2. Analyze the callstack of the thread for suspicious memory addresses
-3. If a thread is in DelayExecution and one of the return addresses in the callstack cannot be associated with a module on disk its probably a running beacon
-
+Sample non file backed beacon:
 ```
-[-] Failed to open process: System (4)
-[-] Failed to open process: System (4)
-[-] Failed to open process: MsMpEng.exe (3424)
 [!] Suspicious Process: PhantomDllHollower.exe
 
         [*] Thread (9192) has State: DelayExecution and abnormal calltrace:
@@ -30,8 +24,26 @@ The metric to detect this kind of malware is thus:
         [*] Sleep Time: 600s
  ``` 
  
-To identify the associated module of each saved instruction pointer, I make use of ```SymGetModuleInfo64```. 
-This also seems to work fine against ideas such as [Phantom Dll Hollowing](https://github.com/forrest-orr/phantom-dll-hollower-poc).
+ Sample beacon which uses module stomping:
+ ```
+[!] Suspicious Process: beacon.exe (5296)
+
+        [*] Thread (2968) has State: DelayExecution and uses potentially stomped module
+        [*] Potentially stomped module: C:\Windows\SYSTEM32\xpsservices.dll
+
+                NtDelayExecution -> C:\Windows\SYSTEM32\ntdll.dll
+                SleepEx -> C:\Windows\System32\KERNELBASE.dll
+                DllGetClassObject -> C:\Windows\SYSTEM32\xpsservices.dll
+
+        [*] Suspicious Sleep() found
+        [*] Sleep Time: 5s
+```
+
+Comparing the .text segments alone would produce too many false positivies, so another metric had to be applied on top.    
+
+To identify the associated module of each saved instruction pointer, I make use of ```SymGetModuleInfo64```. To identify module stomping I walk the callstack and compare the .text segment of each module in memory with the .text segment on disk.    
+
+Tests were done using [Phantom Dll Hollowing](https://github.com/forrest-orr/phantom-dll-hollower-poc) and Cobalt Strike's module stomping.
  
-However, module stomping will bypass this project :-)
-Managed processes calling Sleep() will always be identified due to Jitted code.
+Managed processes calling Sleep() will always be identified due to Jitted code, so in this POC I ignore them.
+There are of course many ways to bypass this project.
