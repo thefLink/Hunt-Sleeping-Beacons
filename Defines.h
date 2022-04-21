@@ -7,21 +7,21 @@
 #define FAIL 0
 #define SUCCESS 1
 
-typedef DelayedProcess;
+#define MAX_CANDIDATES 1024
 
-struct DelayedProcess {
+typedef struct {
 
-    wchar_t* w_process_name;
+    wchar_t* wProcessName;
 
-    DWORD pid;
-    DWORD tid;
+    DWORD dwPid;
+    DWORD dwTid;
 
-    struct DelayedProcess* fDelayedProcess;
-    struct DelayedProcess* bDelayedProcess;
+    ULONGLONG ullUserTime;
+    ULONGLONG ullKernelTime;
 
-};
+} Candidate;
 
-DWORD get_delayed_processes(struct DelayedProcess**);
+DWORD getCandidates(struct Candidate**);
 
 // -------------------- 
 
@@ -95,6 +95,20 @@ typedef enum _KWAIT_REASON
     MaximumWaitReason = 37
 } KWAIT_REASON;
 
+typedef struct {
+    LARGE_INTEGER KernelTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER CreateTime;
+    ULONG WaitTime;
+    PVOID StartAddress;
+    CLIENT_ID ClientId;
+    LONG Priority;
+    LONG BasePriority;
+    ULONG ContextSwitches;
+    ULONG ThreadState;
+    ULONG WaitReason;
+} _SYSTEM_THREAD_INFORMATION, * _PSYSTEM_THREAD_INFORMATION;
+
 typedef struct
 {
     ULONG NextEntryOffset;
@@ -121,21 +135,10 @@ typedef struct
 #endif
     ULONG HandleCount;
     ULONG SessionId;
-    ULONG_PTR UniqueProcessKey; // always NULL, use SystemExtendedProcessInformation (57) to get value
+    ULONG_PTR UniqueProcessKey;
     VM_COUNTERS VirtualMemoryCounters;
     ULONG_PTR PrivatePageCount;
     IO_COUNTERS IoCounters;
-    SYSTEM_THREAD_INFORMATION ThreadInfos[1];
+    _SYSTEM_THREAD_INFORMATION ThreadInfos[1];
 } _SYSTEM_PROCESS_INFORMATION, * _PSYSTEM_PROCESS_INFORMATION;
 
-typedef struct _SYSTEM_EXTENDED_THREAD_INFORMATION
-{
-    SYSTEM_THREAD_INFORMATION ThreadInfo;
-    PVOID StackBase;
-    PVOID StackLimit;
-    PVOID Win32StartAddress;
-    PVOID TebBase; // since VISTA
-    ULONG_PTR Reserved2;
-    ULONG_PTR Reserved3;
-    ULONG_PTR Reserved4;
-} SYSTEM_EXTENDED_THREAD_INFORMATION, * PSYSTEM_EXTENDED_THREAD_INFORMATION;

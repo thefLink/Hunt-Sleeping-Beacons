@@ -1,11 +1,24 @@
 # Hunt-Sleeping-Beacons
 
-The idea of this project is to identify beacons which are unpacked at runtime or running in the context of another process (=InMemory malware).
-To do so, I make use of the following observations:
+The idea of this project is to identify beacons which are unpacked at runtime or running in the context of another process.    
 
-1. Beacons usually call Sleep() between callbacks which sets the treadstate to: **DelayExecution**
-2. If the beacon does not make use of file backed memory, the callstack to NtDelayExecution includes unknown memory regions
-3. If the beacon uses module stomping, one of the modules in the callstack to NtDelayExecution is modified
+To do so, I make use of the observation that beacons tend to call **Sleep** between their callbacks. A call to sleep sets the state of the thread to **DelayExecution** which is taken as a first indiciator that a thread might be executing a beacon.
+
+After enumerating all threads whose state is **DelayExecution**, multiple metrics are applied to identify potential beacons
+
+## Metrics
+
+1. If the beacon does not make use of file backed memory, the callstack to NtDelayExecution includes memory regions which can not be associated with a file on disk.
+2. If the beacon uses module stomping, one of the modules in the callstack to NtDelayExecution is modified
+
+Projects, such as [Threadstackspoofer](https://github.com/mgeeky/ThreadStackSpoofer), hook Sleep to spoof the callstack or to use [another technique to wait between callbacks](https://github.com/waldo-irc/YouMayPasser/blob/master/Lockd/Lockd/Sleep.cpp). Thus, I added two more metrics:
+
+3. Inline Hooks of Sleep can be fingerprinted by enumerating memory areas marked as private (not shared) storing the .text segment of Kernel32. This also applies if the hook is removed temporarily
+4. Since a beacon spends more time waiting for commands than actually executing code, it can be fingerprinted by comparing the fields ```KernelTime``` and ```UserTime``` of ```SYSTEM_THREAD_INFORMATION```. Initially I thought that the time sleeping would count as time spent in Kernelmode, but it turned out the other way. I am not sure why :'P Additionally, both fields increase only after the operator executed some commands with the beacon. Also here, I am not sure why :'P
+
+To decrease false positives, I decided to considerate only processes with loaded **wininet.dll** or **winhttp.dll**. Additionally, I had to ignore jitted processes (.NET) and modifications to **ntdll.dll** which also seems to happen legitimately. Metric three and four are still applied though.
+
+## Examples
 
 Sample non file backed beacon:
 ```
@@ -24,7 +37,7 @@ Sample non file backed beacon:
         [*] Sleep Time: 600s
  ``` 
  
- Sample beacon which uses module stomping:
+ Sample beacon using module stomping:
  ```
 [!] Suspicious Process: beacon.exe (5296)
 
@@ -38,12 +51,19 @@ Sample non file backed beacon:
         [*] Suspicious Sleep() found
         [*] Sleep Time: 5s
 ```
+Sample beacon inline hooking sleep
+``` 
+[!] Suspicious Process: ThreadStackSpoofer.exe (4876). Potentially hooked Sleep / Modifies Kernel32.dll
+```
+Identification of generic beaconing behaviour by comparing ```KernelTime``` and ```UserTime```:
+```
+[!] Suspicious Process: ThreadStackSpoofer.exe (4876). Thread 1132 has state DelayExecution and spends 94% of the time in usermode
+```
 
-Comparing the .text segments alone would produce too many false positivies, so another metric had to be applied on top.    
+## Misc
 
-To identify the associated module of each saved instruction pointer, I make use of ```SymGetModuleInfo64```. To identify module stomping I walk the callstack and compare the .text segment of each module in the callstack with the .text segment on disk.    
+There are of course many ways to bypass this project. :-)
 
-Tests were done using [Phantom Dll Hollowing](https://github.com/forrest-orr/phantom-dll-hollower-poc) and Cobalt Strike's module stomping.
- 
-Managed processes calling Sleep() will always be identified due to Jitted code, so in this POC I ignore them.
-There are of course many ways to bypass this project.
+## Credits
+- [forrestorr](https://twitter.com/_forrestorr) for documenting the detection of modified dlls based on shared/private memory areas [link](https://www.forrest-orr.net/post/malicious-memory-artifacts-part-i-dll-hollowing)
+- [waldoirc](https://twitter.com/waldoirc) for general support :-)

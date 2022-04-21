@@ -2,128 +2,146 @@
 
 #include "windows.h"
 #include "dbghelp.h"
-#include <TlHelp32.h>
 #include <winternl.h>
 #include <winnt.h>
+#include "psapi.h"
 
 #include "Defines.h"
 
-void analyze_process(wchar_t*, DWORD, DWORD);
-DWORD check_tampering(HANDLE, DWORD64, SIZE_T, char*, PBOOL);
-DWORD get_delayed_processes(struct DelayedProcess**);
+DWORD checkCallstack(LPWSTR, DWORD, DWORD);
+DWORD checkHttpCapabilities(DWORD, PBOOL);
+DWORD checkInlineHooks(LPWSTR, DWORD);
+DWORD checkModuleStomping(HANDLE, DWORD64, SIZE_T, char*, PBOOL);
+DWORD checkLandDiff(LPWSTR, DWORD, DWORD, ULONGLONG, ULONGLONG);
+DWORD getCandidates(Candidate**, PDWORD);
+WCHAR* toLower(WCHAR* str);
 
 DWORD
 main(int argc, char** argv) {
 
-	DWORD dw_success = FAIL;
-	struct DelayedProcess* delayed_process = NULL;
+	DWORD dwSuccess = FAIL, dwNumCandidates = 0;
+	Candidate* candidates[MAX_CANDIDATES] = { 0x00 }, * pCandidate = NULL;;
 
-	dw_success = get_delayed_processes(&delayed_process);
-	if (dw_success == FAIL) {
+	printf("[*] Hunt-Sleeping-Beacons\n");
+	printf("[*] Checking for processes with loaded wininet/winhttp and threads in state DelayExecution\n");
+
+	dwSuccess = getCandidates(&candidates, &dwNumCandidates);
+	if (dwSuccess == FAIL) {
 		printf("[-] Error enumerating processes\n");
 		goto exit;
 	}
 
-	while (delayed_process) {
+	printf("[*] Found %d threads in state DelayExecution, now checking for suspicious artifacts\n", dwNumCandidates);
+	printf("[*] Checking for: \n\n\t1. Unknown modules in calltrace to NtDelayExecution\n\t2. Modified modules in calltrace to NtDelayExecution\n\t3. Abnormal difference between time spent in usermode vs kernelmode\n\t4. Abnormal private memory in kernel32 text segment to detect inline hooks of Sleep()\n\n");
+	printf("[*] ========================================= \n");
 
-		analyze_process(delayed_process->w_process_name, delayed_process->pid, delayed_process->tid);
-		delayed_process = delayed_process->fDelayedProcess;
+	for (DWORD dwIdx = 0; dwIdx < dwNumCandidates && candidates[dwIdx] != NULL; dwIdx++) {
+
+		pCandidate = candidates[dwIdx];
+
+		checkCallstack(pCandidate->wProcessName, pCandidate->dwPid, pCandidate->dwTid);
+		checkLandDiff(pCandidate->wProcessName, pCandidate->dwPid, pCandidate->dwTid, pCandidate->ullUserTime, pCandidate->ullKernelTime);
+		checkInlineHooks(pCandidate->wProcessName, pCandidate->dwPid);
 
 	}
 
+	dwSuccess = SUCCESS;
+
 exit:
-	return dw_success;
+
+	printf("[*] End\n");
+
+	return dwSuccess;
 
 }
 
-void analyze_process(wchar_t* w_process_name, DWORD pid, DWORD tid) {
+DWORD checkCallstack(LPWSTR wProcessName, DWORD dwPid, DWORD dwTid) {
 
-	BOOL b_success = FALSE, b_has_module_name = FALSE, b_abnormal_calltrace = FALSE, b_module_is_tampered = FALSE, b_module_stomping_detected = FALSE;
-	DWORD64 displacement = 0x00, dw_read = 0x00;
-	DWORD dw_success = FAIL;
-	char sym_name[256] = { 0x00 }, calltrace[4096] = { 0x00 }, tmp[256] = { 0x00 }, stomped_module_name[MAX_PATH + 1] = { 0x00 };
-	HANDLE h_process = NULL, h_thread = NULL;
+	BOOL bSuccess = FALSE, bModuleFound = FALSE, bAbnormalCalltrace = FALSE, bModuleTampered = FALSE, bModuleStompingDetected = FALSE;
+	DWORD64 dw64Displacement = 0x00, dw64Read = 0x00;
+	DWORD dwSuccess = FAIL;
+	char cSymName[256] = { 0x00 }, cCalltrace[4096] = { 0x00 }, cTmp[256] = { 0x00 }, cStompedModule[MAX_PATH + 1] = { 0x00 };
+	HANDLE hProcess = NULL, hThread = NULL;
 
 	LARGE_INTEGER delayInterval = { 0x00 };
-	CONTEXT t_context = { 0x00 };
+	CONTEXT context = { 0x00 };
 	STACKFRAME64 stackframe = { 0x00 };
-	IMAGEHLP_SYMBOL64* ptr_symbol = NULL;
-	IMAGEHLP_MODULE64* ptr_modinfo = NULL;
+	IMAGEHLP_SYMBOL64* pSymbol = NULL;
+	IMAGEHLP_MODULE64* pModInfo = NULL;
 
-	t_context.ContextFlags = CONTEXT_FULL;
+	context.ContextFlags = CONTEXT_FULL;
 
-	h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-	if (h_process == NULL) {
-		printf("[-] Failed to open process: %ws (%d)\n", w_process_name, pid);
-		return;
+	hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwPid);
+	if (hProcess == NULL) {
+		printf("[-] Failed to open process: %ws (%d)\n", wProcessName, dwPid);
+		return FAIL;
 	}
 
-	h_thread = OpenThread(THREAD_ALL_ACCESS, FALSE, tid);
-	if (h_thread == NULL) {
-		printf("[-] Failed to open thread: %d\n", tid);
-		return;
+	hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dwTid);
+	if (hThread == NULL) {
+		printf("[-] Failed to open thread: %d\n", dwTid);
+		return FAIL;
 	}
 
-	b_success = GetThreadContext(h_thread, &t_context);
-	if (b_success == FALSE) {
-		printf("[-] Failed to get thread context for: %d\n", tid);
-		return;
+	bSuccess = GetThreadContext(hThread, &context);
+	if (bSuccess == FALSE) {
+		printf("[-] Failed to get thread context for: %d\n", dwTid);
+		return FAIL;
 	}
 
-	stackframe.AddrPC.Offset = t_context.Rip;
+	stackframe.AddrPC.Offset = context.Rip;
 	stackframe.AddrPC.Mode = AddrModeFlat;
-	stackframe.AddrStack.Offset = t_context.Rsp;
+	stackframe.AddrStack.Offset = context.Rsp;
 	stackframe.AddrStack.Mode = AddrModeFlat;
-	stackframe.AddrFrame.Offset = t_context.Rbp;
+	stackframe.AddrFrame.Offset = context.Rbp;
 	stackframe.AddrFrame.Mode = AddrModeFlat;
 
-	SymInitialize(h_process, NULL, TRUE);
-	ptr_symbol = (IMAGEHLP_SYMBOL64*)VirtualAlloc(0, sizeof(IMAGEHLP_SYMBOL64) + 256 * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
-	if (ptr_symbol == NULL)
-		return;
+	SymInitialize(hProcess, NULL, TRUE);
+	pSymbol = (IMAGEHLP_SYMBOL64*)VirtualAlloc(0, sizeof(IMAGEHLP_SYMBOL64) + 256 * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
+	if (pSymbol == NULL)
+		return FAIL;
 
-	ptr_modinfo = (IMAGEHLP_MODULE64*)VirtualAlloc(0, sizeof(IMAGEHLP_MODULE64) + 256 * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
-	if (ptr_modinfo == NULL)
-		return;
+	pModInfo = (IMAGEHLP_MODULE64*)VirtualAlloc(0, sizeof(IMAGEHLP_MODULE64) + 256 * sizeof(wchar_t), MEM_COMMIT, PAGE_READWRITE);
+	if (pModInfo == NULL)
+		return FAIL;
 
-	ptr_symbol->SizeOfStruct = sizeof(IMAGEHLP_SYMBOL64);
-	ptr_symbol->MaxNameLength = 255;
+	pSymbol->SizeOfStruct = sizeof(IMAGEHLP_SYMBOL64);
+	pSymbol->MaxNameLength = 255;
 
-	ptr_modinfo->SizeOfStruct = sizeof(IMAGEHLP_MODULE64);
+	pModInfo->SizeOfStruct = sizeof(IMAGEHLP_MODULE64);
 
 	do {
 
-		memset(tmp, 0, 256);
+		memset(cTmp, 0, 256);
 
-		b_success = StackWalk64(IMAGE_FILE_MACHINE_AMD64, h_process, h_thread, &stackframe, &t_context, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL);
-		if (b_success == FALSE)
+		bSuccess = StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProcess, hThread, &stackframe, &context, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL);
+		if (bSuccess == FALSE)
 			break;
 
-		b_has_module_name = SymGetModuleInfo64(h_process, (ULONG64)stackframe.AddrPC.Offset, ptr_modinfo);
-		if (b_has_module_name == FALSE) { // This saved instruction pointer cannot be mapped to a file on disk
+		bModuleFound = SymGetModuleInfo64(hProcess, (ULONG64)stackframe.AddrPC.Offset, pModInfo);
+		if (bModuleFound == FALSE) { // This saved instruction pointer cannot be mapped to a file on disk
 
-			wsprintfA(tmp, "\t\t0x%p -> Unknown module\n", (void*)stackframe.AddrPC.Offset);
-			lstrcatA(calltrace, tmp);
+			wsprintfA(cTmp, "\t\t0x%p -> Unknown module\n", (void*)stackframe.AddrPC.Offset);
+			lstrcatA(cCalltrace, cTmp);
 
-			b_abnormal_calltrace = TRUE;
+			bAbnormalCalltrace = TRUE;
 
 		}
 		else { // Has this module been tampered with?
 
-			SymGetSymFromAddr64(h_process, (ULONG64)stackframe.AddrPC.Offset, &displacement, ptr_symbol);
-			UnDecorateSymbolName(ptr_symbol->Name, sym_name, 256, UNDNAME_COMPLETE);
-			wsprintfA(tmp, "\t\t%s -> %s\n", sym_name, ptr_modinfo->ImageName);
-			lstrcatA(calltrace, tmp);
+			SymGetSymFromAddr64(hProcess, (ULONG64)stackframe.AddrPC.Offset, &dw64Displacement, pSymbol);
+			UnDecorateSymbolName(pSymbol->Name, cSymName, 256, UNDNAME_COMPLETE);
+			wsprintfA(cTmp, "\t\t%s -> %s\n", cSymName, pModInfo->ImageName);
+			lstrcatA(cCalltrace, cTmp);
 
-			dw_success = check_tampering(h_process, ptr_modinfo->BaseOfImage, ptr_modinfo->ImageSize, ptr_modinfo->ImageName, &b_module_is_tampered);
-			if (dw_success == FAIL)
-				printf("[-] Could not check module: %s for tampering in process: %d\n", ptr_modinfo->ImageName, pid);
+			dwSuccess = checkModuleStomping(hProcess, pModInfo->BaseOfImage, pModInfo->ImageSize, pModInfo->ImageName, &bModuleTampered);
+			if (dwSuccess == FAIL)
+				printf("[-] Could not check module: %s for tampering in process: %d\n", pModInfo->ImageName, dwPid);
 
+			if (bModuleTampered) {
 
-			if (b_module_is_tampered) {
-
-				lstrcpyA(stomped_module_name, ptr_modinfo->ImageName);
-				b_module_stomping_detected = TRUE;
+				lstrcpyA(cStompedModule, pModInfo->ImageName);
+				bModuleStompingDetected = TRUE;
 
 			}
 
@@ -133,32 +151,33 @@ void analyze_process(wchar_t* w_process_name, DWORD pid, DWORD tid) {
 
 	} while (1);
 
-	if (b_abnormal_calltrace) {
+	if (strstr(cCalltrace, "Microsoft.NET") != NULL) // Cheap way to ignore managed processes :-)
+		goto exit;
 
-		printf("[!] Suspicious Process: %ws (%d)\n\n", w_process_name, pid);
-		printf("\t[*] Thread (%d) has State: DelayExecution and abnormal calltrace:\n", tid);
-		printf("\t\t\n%s\n", calltrace);
+	if (bAbnormalCalltrace) {
+
+		printf("[!] Suspicious Process: %ws (%d)\n\n", wProcessName, dwPid);
+		printf("\t[*] Thread (%d) has State: DelayExecution and abnormal calltrace:\n", dwTid);
+		printf("\t\t\n%s\n", cCalltrace);
 
 	}
-	else if (b_module_stomping_detected) {
+	else if (bModuleStompingDetected) {
 
-		if (strstr(calltrace, "Microsoft.NET") != NULL) // Cheap way to ignore managed processes :-)
+		if (strstr(cStompedModule, "ntdll.dll") != NULL || strstr(cStompedModule, "KERNELBASE.dll") != NULL) // This appears to happen legitimately sometimes  
 			goto exit;
 
-		printf("[!] Suspicious Process: %ws (%d)\n\n", w_process_name, pid);
-		printf("\t[*] Thread (%d) has State: DelayExecution and uses potentially stomped module\n", tid);
-		printf("\t[*] Potentially stomped module: %s\n", stomped_module_name);
-		printf("\t\t\n%s\n", calltrace);
-
-	
+		printf("[!] Suspicious Process: %ws (%d)\n\n", wProcessName, dwPid);
+		printf("\t[*] Thread (%d) has State: DelayExecution and uses potentially stomped module\n", dwTid);
+		printf("\t[*] Potentially stomped module: %s\n", cStompedModule);
+		printf("\t\t\n%s\n", cCalltrace);
 
 	}
 
-	if (b_module_stomping_detected || b_abnormal_calltrace) {
+	if (bModuleStompingDetected || bAbnormalCalltrace) {
 
-		if (strstr(calltrace, "Sleep") != NULL) {
+		if (strstr(cCalltrace, "Sleep") != NULL) {
 			printf("\t[*] Suspicious Sleep() found\n");
-			ReadProcessMemory(h_process, (LPCVOID)t_context.Rdx, (LPVOID)&delayInterval.QuadPart, sizeof(LONGLONG), &dw_read);
+			ReadProcessMemory(hProcess, (LPCVOID)context.Rdx, (LPVOID)&delayInterval.QuadPart, sizeof(LONGLONG), &dw64Read);
 			printf("\t[*] Sleep Time: %llds\n", ((~delayInterval.QuadPart + 1) / 10000) / 1000);
 		}
 
@@ -166,187 +185,347 @@ void analyze_process(wchar_t* w_process_name, DWORD pid, DWORD tid) {
 
 	}
 
+	dwSuccess = SUCCESS;
+
 exit:
 
-	if (ptr_symbol)
-		VirtualFree(ptr_symbol, 0, MEM_RELEASE);
+	if (pSymbol)
+		VirtualFree(pSymbol, 0, MEM_RELEASE);
 
-	if (h_process)
-		SymCleanup(h_process);
+	if (hProcess)
+		SymCleanup(hProcess);
 
-	if (h_process)
-		CloseHandle(h_process);
+	if (hProcess)
+		CloseHandle(hProcess);
+
+	return dwSuccess;
 
 }
 
-DWORD check_tampering(HANDLE h_proc, DWORD64 base_addr, SIZE_T image_size, char* module_name, PBOOL ptr_bool_tampered) {
+DWORD checkModuleStomping(HANDLE hProc, DWORD64 dw64BaseAddr, SIZE_T sizeImage, char* pcModuleName, PBOOL pbModuleTampered) {
 
-	DWORD dw_success = FAIL, dw_read = 0;
-	SIZE_T n_read = 0;
-	BOOL b_success = FALSE;
-	void* buf_module_tmp = NULL, * buf_text_memory = NULL, * buf_text_disk = NULL;
+	DWORD dwSuccess = FAIL, dwRead = 0;
+	SIZE_T nRead = 0;
+	BOOL bSuccess = FALSE;
+	void* pBufModuleTmp = NULL, * pBufTextMemory = NULL, * pBufTextDisk = NULL;
 
-	PIMAGE_DOS_HEADER ptr_dos_hdr = NULL;
-	PIMAGE_NT_HEADERS ptr_nt_hdrs = NULL;
-	PIMAGE_SECTION_HEADER ptr_section_hdr = NULL;
-	HANDLE h_module_disk = NULL;
+	PIMAGE_DOS_HEADER pDosHdr = NULL;
+	PIMAGE_NT_HEADERS pNtHdrs = NULL;
+	PIMAGE_SECTION_HEADER pSectionHdr = NULL;
+	HANDLE hModuleDisk = NULL;
 
-	*ptr_bool_tampered = FALSE;
+	*pbModuleTampered = FALSE;
 
-	buf_module_tmp = VirtualAlloc(0, image_size, MEM_COMMIT, PAGE_READWRITE);
-	if (buf_module_tmp == NULL)
+	pBufModuleTmp = VirtualAlloc(0, sizeImage, MEM_COMMIT, PAGE_READWRITE);
+	if (pBufModuleTmp == NULL)
 		goto exit;
 
 	/* Get .text from memory */
-	b_success = ReadProcessMemory(h_proc, (LPCVOID)base_addr, buf_module_tmp, image_size, &n_read);
-	if (b_success == FALSE)
+	bSuccess = ReadProcessMemory(hProc, (LPCVOID)dw64BaseAddr, pBufModuleTmp, sizeImage, &nRead);
+	if (bSuccess == FALSE)
 		goto exit;
 
-	ptr_dos_hdr = (PIMAGE_DOS_HEADER)buf_module_tmp;
-	ptr_nt_hdrs = (PIMAGE_NT_HEADERS)((uint8_t*)buf_module_tmp + ptr_dos_hdr->e_lfanew);
-	ptr_section_hdr = (PIMAGE_SECTION_HEADER)((uint8_t*)&ptr_nt_hdrs->OptionalHeader + sizeof(IMAGE_OPTIONAL_HEADER));
+	pDosHdr = (PIMAGE_DOS_HEADER)pBufModuleTmp;
+	pNtHdrs = (PIMAGE_NT_HEADERS)((uint8_t*)pBufModuleTmp + pDosHdr->e_lfanew);
+	pSectionHdr = (PIMAGE_SECTION_HEADER)((uint8_t*)&pNtHdrs->OptionalHeader + sizeof(IMAGE_OPTIONAL_HEADER));
 
-	for (int i = 0; i < ptr_nt_hdrs->FileHeader.NumberOfSections; i++) {
+	for (int i = 0; i < pNtHdrs->FileHeader.NumberOfSections; i++) {
 
-		if (lstrcmpA(ptr_section_hdr->Name, ".text") == 0) {
+		if (lstrcmpA(pSectionHdr->Name, ".text") == 0) {
 
-			buf_text_memory = VirtualAlloc(0, ptr_section_hdr->SizeOfRawData, MEM_COMMIT, PAGE_READWRITE);
-			if (buf_text_memory == NULL)
+			pBufTextMemory = VirtualAlloc(0, pSectionHdr->Misc.VirtualSize, MEM_COMMIT, PAGE_READWRITE);
+			if (pBufTextMemory == NULL)
 				goto exit;
 
-			memcpy(buf_text_memory, (uint8_t*)((uint8_t*)buf_module_tmp + ptr_section_hdr->VirtualAddress), ptr_section_hdr->SizeOfRawData);
+			memcpy(pBufTextMemory, (uint8_t*)((uint8_t*)pBufModuleTmp + pSectionHdr->VirtualAddress), pSectionHdr->Misc.VirtualSize);
 
 			break;
 
 		}
 
-		ptr_section_hdr = (PIMAGE_SECTION_HEADER)((uint8_t*)ptr_section_hdr + sizeof(IMAGE_SECTION_HEADER));
+		pSectionHdr = (PIMAGE_SECTION_HEADER)((uint8_t*)pSectionHdr + sizeof(IMAGE_SECTION_HEADER));
 
 	}
 
 	/* Get .text from disk */
-	h_module_disk = CreateFileA(module_name, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (h_module_disk == INVALID_HANDLE_VALUE)
+	hModuleDisk = CreateFileA(pcModuleName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hModuleDisk == INVALID_HANDLE_VALUE)
 		goto exit;
 
-	b_success = ReadFile(h_module_disk, buf_module_tmp, (DWORD)image_size, &dw_read, NULL);
-	if (b_success == FALSE)
+	bSuccess = ReadFile(hModuleDisk, pBufModuleTmp, (DWORD)sizeImage, &dwRead, NULL);
+	if (bSuccess == FALSE)
 		goto exit;
 
-	ptr_section_hdr = (PIMAGE_SECTION_HEADER)((uint8_t*)&ptr_nt_hdrs->OptionalHeader + sizeof(IMAGE_OPTIONAL_HEADER));
-	for (int i = 0; i < ptr_nt_hdrs->FileHeader.NumberOfSections; i++) {
+	pSectionHdr = (PIMAGE_SECTION_HEADER)((uint8_t*)&pNtHdrs->OptionalHeader + sizeof(IMAGE_OPTIONAL_HEADER));
+	for (int i = 0; i < pNtHdrs->FileHeader.NumberOfSections; i++) {
 
-		if (lstrcmpA(ptr_section_hdr->Name, ".text") == 0) {
+		if (lstrcmpA(pSectionHdr->Name, ".text") == 0) {
 
-			buf_text_disk = VirtualAlloc(0, ptr_section_hdr->SizeOfRawData, MEM_COMMIT, PAGE_READWRITE);
-			if (buf_text_disk == NULL)
+			pBufTextDisk = VirtualAlloc(0, pSectionHdr->SizeOfRawData, MEM_COMMIT, PAGE_READWRITE);
+			if (pBufTextDisk == NULL)
 				goto exit;
 
-			memcpy(buf_text_disk, (uint8_t*)((uint8_t*)buf_module_tmp + ptr_section_hdr->PointerToRawData), ptr_section_hdr->SizeOfRawData);
+			memcpy(pBufTextDisk, (uint8_t*)((uint8_t*)pBufModuleTmp + pSectionHdr->PointerToRawData), pSectionHdr->SizeOfRawData);
 			break;
 
 		}
 
-		ptr_section_hdr = (PIMAGE_SECTION_HEADER)((uint8_t*)ptr_section_hdr + sizeof(IMAGE_SECTION_HEADER));
+		pSectionHdr = (PIMAGE_SECTION_HEADER)((uint8_t*)pSectionHdr + sizeof(IMAGE_SECTION_HEADER));
 
 	}
 
-	if (buf_text_disk == NULL || buf_text_memory == NULL)
+	if (pBufTextDisk == NULL || pBufTextMemory == NULL)
 		goto exit;
 
 	/* Compare the segments */
-	int n = memcmp(buf_text_disk, buf_text_memory, ptr_section_hdr->SizeOfRawData);
+	int n = memcmp(pBufTextDisk, pBufTextMemory, pSectionHdr->SizeOfRawData);
 	if (n != 0)
-		*ptr_bool_tampered = TRUE;
+		*pbModuleTampered = TRUE;
 
-	dw_success = SUCCESS;
+	dwSuccess = SUCCESS;
 
 exit:
 
-	if (buf_module_tmp)
-		VirtualFree(buf_module_tmp, 0, MEM_RELEASE);
+	if (pBufModuleTmp)
+		VirtualFree(pBufModuleTmp, 0, MEM_RELEASE);
 
-	if (buf_text_memory)
-		VirtualFree(buf_text_memory, 0, MEM_RELEASE);
+	if (pBufTextMemory)
+		VirtualFree(pBufTextMemory, 0, MEM_RELEASE);
 
-	if (buf_text_disk)
-		VirtualFree(buf_text_disk, 0, MEM_RELEASE);
+	if (pBufTextDisk)
+		VirtualFree(pBufTextDisk, 0, MEM_RELEASE);
 
-	if (h_module_disk)
-		CloseHandle(h_module_disk);
+	if (hModuleDisk)
+		CloseHandle(hModuleDisk);
 
-	return dw_success;
+	return dwSuccess;
 
 }
 
-DWORD get_delayed_processes(struct DelayedProcess** pptr_delayed_process) {
+DWORD checkLandDiff(LPWSTR wProcessName, DWORD dwPid, DWORD dwTid, ULONGLONG ullUserTime, ULONGLONG ullKernelTime) {
 
-	DWORD dw_success = FAIL;
-	ULONG buffer_size = 0;
+	DWORD dwSuccess = FAIL, dwPercent = 0, dwOverAll = 0;
+	ULONGLONG ullOverAll = 0;
+
+	ullOverAll = (ULONGLONG)(ullUserTime + ullKernelTime);
+	if (ullOverAll == 0)
+		goto exit;
+
+	dwPercent = (ullUserTime * 100) / ullOverAll;
+	if (dwPercent >= 65)
+		printf("[!] Suspicious Process: %ws (%d). Thread %d has state DelayExecution and spends ~%d%% of the time in usermode\n",
+			wProcessName, dwPid, dwTid, dwPercent);
+
+	dwSuccess = SUCCESS;
+
+exit:
+
+	return dwSuccess;
+
+}
+
+DWORD getCandidates(Candidate** ppCandidate, PDWORD pdwNumCandidates) {
+
+	DWORD dwSuccess = FAIL;
+	ULONG uBufferSize = 0;
 	NTSTATUS status = STATUS_UNSUCCESSFUL;
-	PVOID buffer = NULL;
+	PVOID pBuffer = NULL;
+	BOOL bHTTPCapable = FALSE;
 
-	_PSYSTEM_PROCESS_INFORMATION process_information = NULL;
-	SYSTEM_THREAD_INFORMATION thread_information = { 0x00 };
-	struct DelayedProcess* ptr_delayed_process = NULL, * ptr_b_delayed_process = NULL;
+	_PSYSTEM_PROCESS_INFORMATION pProcessInformation = NULL;
+	_SYSTEM_THREAD_INFORMATION thread_information = { 0x00 };
+	Candidate* pCandidate = NULL;
 
 	do {
-		status = NtQuerySystemInformation((SYSTEM_INFORMATION_CLASS)5, buffer, buffer_size, &buffer_size);
+		status = NtQuerySystemInformation((SYSTEM_INFORMATION_CLASS)5, pBuffer, uBufferSize, &uBufferSize);
 		if (!NT_SUCCESS(status)) {
 			if (status == STATUS_INFO_LENGTH_MISMATCH) {
-				if (buffer != NULL)
-					VirtualFree(buffer, 0, MEM_RELEASE);
-				buffer = VirtualAlloc(NULL, buffer_size, MEM_COMMIT, PAGE_READWRITE);
+				if (pBuffer != NULL)
+					VirtualFree(pBuffer, 0, MEM_RELEASE);
+				pBuffer = VirtualAlloc(NULL, uBufferSize, MEM_COMMIT, PAGE_READWRITE);
 				continue;
 			}
 			break;
 		}
 		else {
-			process_information = (_PSYSTEM_PROCESS_INFORMATION)buffer;
+			pProcessInformation = (_PSYSTEM_PROCESS_INFORMATION)pBuffer;
 			break;
 		}
 	} while (1);
 
-	while (process_information && process_information->NextEntryOffset) {
+	while (pProcessInformation && pProcessInformation->NextEntryOffset) {
 
+		for (ULONG i = 0; i < pProcessInformation->NumberOfThreads; i++) {
 
-		for (ULONG i = 0; i < process_information->NumberOfThreads; i++) {
+			thread_information = pProcessInformation->ThreadInfos[i];
 
-			thread_information = process_information->ThreadInfos[i];
+			if (thread_information.WaitReason != DelayExecution)
+				continue;
 
-			if (thread_information.WaitReason == DelayExecution) {
+			dwSuccess = checkHttpCapabilities((DWORD)pProcessInformation->ProcessId, &bHTTPCapable);
+			if (dwSuccess == FALSE || bHTTPCapable == FALSE)
+				continue;
 
-				ptr_delayed_process = (struct DelayedProcess*)VirtualAlloc(0, sizeof(struct DelayedProcess), MEM_COMMIT, PAGE_READWRITE);
-				if (ptr_delayed_process == NULL)
-					goto exit;
+			pCandidate = (Candidate*)VirtualAlloc(0, sizeof(Candidate), MEM_COMMIT, PAGE_READWRITE);
+			if (pCandidate == NULL)
+				goto exit;
 
-				ptr_delayed_process->w_process_name = process_information->ImageName.Buffer;
-				ptr_delayed_process->pid = process_information->ProcessId;
-				ptr_delayed_process->tid = (DWORD)thread_information.ClientId.UniqueThread;
+			pCandidate->wProcessName = pProcessInformation->ImageName.Buffer;
+			pCandidate->dwPid = pProcessInformation->ProcessId;
+			pCandidate->dwTid = (DWORD)thread_information.ClientId.UniqueThread;
+			pCandidate->ullKernelTime = thread_information.KernelTime.QuadPart;
+			pCandidate->ullUserTime = thread_information.UserTime.QuadPart;
 
-				if (ptr_b_delayed_process != NULL) {
-					ptr_delayed_process->bDelayedProcess = ptr_b_delayed_process;
-					ptr_b_delayed_process->fDelayedProcess = ptr_delayed_process;
-				}
-
-				ptr_b_delayed_process = ptr_delayed_process;
-
-			}
+			ppCandidate[*pdwNumCandidates] = pCandidate;
+			*pdwNumCandidates += 1;
 
 		}
 
-		process_information = (_PSYSTEM_PROCESS_INFORMATION)((LPBYTE)process_information + process_information->NextEntryOffset);
+		pProcessInformation = (_PSYSTEM_PROCESS_INFORMATION)((LPBYTE)pProcessInformation + pProcessInformation->NextEntryOffset);
 
 	}
 
-	while (ptr_delayed_process && ptr_delayed_process->bDelayedProcess)
-		ptr_delayed_process = ptr_delayed_process->bDelayedProcess;
-
-	*pptr_delayed_process = ptr_delayed_process;
-
-	dw_success = SUCCESS;
+	dwSuccess = SUCCESS;
 
 exit:
-	return dw_success;
+	return dwSuccess;
+
+}
+
+/* As documented here https://www.forrest-orr.net/post/malicious-memory-artifacts-part-i-dll-hollowing */
+DWORD checkInlineHooks(LPWSTR wProcessName, DWORD dwPid) { 
+
+	DWORD dwSuccess = FAIL, dwPrivate = 0;
+	HANDLE hProcess = NULL, hModuleSnapshot = NULL;
+	BOOL bFoundKernel32 = FALSE;
+
+	SYSTEM_INFO si = { 0x00 };
+	MEMORY_BASIC_INFORMATION mbi = { 0x00 };
+	MODULEENTRY32W mod = { 0x00 };
+	PSAPI_WORKING_SET_EX_INFORMATION wsInfo = { 0x00 };
+
+	GetSystemInfo(&si);
+
+	hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwPid);
+	if (hProcess == NULL) {
+		//printf("[-] Failed to open process: %d\n", dwPid);
+		goto exit;
+	}
+
+	hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, dwPid);
+	if (hModuleSnapshot == INVALID_HANDLE_VALUE) {
+		//printf("[-] Failed to snapshot module list for pid: %d\n", dwPid);
+		goto exit;
+	}
+
+	mod.dwSize = sizeof(MODULEENTRY32W);
+	Module32FirstW(hModuleSnapshot, &mod);
+
+	do {
+
+		if (!lstrcmpW(toLower(mod.szModule), L"kernel32.dll"))
+			bFoundKernel32 = TRUE;
+
+	} while (bFoundKernel32 == FALSE && Module32NextW(hModuleSnapshot, &mod));
+
+	if (bFoundKernel32 == FALSE) {
+		//printf("[-] Failed to identify Kernel32.dll in process: %d\n", dwPid);
+		goto exit;
+	}
+
+	PVOID pMem = mod.modBaseAddr;
+	while (pMem < mod.modBaseAddr + mod.modBaseSize) {
+
+		VirtualQueryEx(hProcess, pMem, &mbi, sizeof(MEMORY_BASIC_INFORMATION));
+		pMem = (PVOID)((PBYTE)pMem + 0x1000);
+
+		if (mbi.Type != MEM_IMAGE || mbi.Protect != PAGE_EXECUTE_READ)
+			continue;
+
+		wsInfo.VirtualAddress = (PVOID)((PBYTE)mbi.BaseAddress);
+
+		dwSuccess = K32QueryWorkingSetEx(hProcess, &wsInfo, sizeof(PSAPI_WORKING_SET_EX_INFORMATION));
+		if (dwSuccess == FAIL) {
+			//printf("[-] Failed to Query Working Set\n");
+			goto exit;
+		}
+
+		if (!wsInfo.VirtualAttributes.Shared)
+			dwPrivate += 0x1000;
+
+		if (dwPrivate) {
+			printf("[!] Suspicious Process: %ws (%d). Potentially hooked Sleep / Modifies Kernel32.dll\n", wProcessName, dwPid);
+			break;
+		}
+
+	}
+
+	dwSuccess = SUCCESS;
+
+exit:
+
+	if (hProcess)
+		CloseHandle(hProcess);
+
+	return dwSuccess;
+
+}
+
+DWORD checkHttpCapabilities(DWORD dwPid, PBOOL pbHttpCapable) {
+
+	HANDLE hModuleSnapshot = NULL;
+	MODULEENTRY32W mod = { 0x00 };
+
+	DWORD dwSuccess = FAIL;
+
+	*pbHttpCapable = FALSE;
+
+	hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, dwPid);
+	if (hModuleSnapshot == INVALID_HANDLE_VALUE) {
+		//printf("[-] Failed to snapshot module list for pid: %d\n", dwPid);
+		goto exit;
+	}
+
+	memset(&mod, 0, sizeof(mod));
+	mod.dwSize = sizeof(MODULEENTRY32W);
+	Module32FirstW(hModuleSnapshot, &mod);
+
+	do {
+
+		if (!lstrcmpW(toLower(mod.szModule), L"wininet.dll") || !lstrcmpW(toLower(mod.szModule), L"winhttp.dll")) {
+			*pbHttpCapable = TRUE;
+			break;
+		}
+
+
+	} while (Module32NextW(hModuleSnapshot, &mod));
+
+	dwSuccess = SUCCESS;
+
+exit:
+
+	if (hModuleSnapshot)
+		CloseHandle(hModuleSnapshot);
+
+	return dwSuccess;
+
+}
+
+WCHAR* toLower(WCHAR* str)
+{
+
+	WCHAR* start = str;
+
+	while (*str) {
+
+		if (*str <= L'Z' && *str >= 'A') {
+			*str += 32;
+		}
+
+		str += 1;
+
+	}
+
+	return start;
 
 }
