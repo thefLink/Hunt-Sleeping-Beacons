@@ -1,24 +1,18 @@
 # Hunt-Sleeping-Beacons
 
-The idea of this project is to identify beacons which are unpacked at runtime or running in the context of another process.    
+The idea of this project is to identify beacons which are **unpacked at runtime or running in the context of an other process**.    
 
-To do so, I make use of the observation that beacons tend to call **Sleep** between their callbacks. A call to sleep sets the state of the thread to **DelayExecution** which is taken as a first indiciator that a thread might be executing a beacon.
+All metrics applied are based on the observation that beacons tend to wait between their callbacks and this project aims to identify abnormal behaviour which caused the delay.
 
-After enumerating all threads whose state is **DelayExecution**, multiple metrics are applied to identify potential beacons
+## DelayExecution
 
-## Metrics
+Most C2 agents tend to call ```Kernel32!Sleep``` which in turn calls ```Ntdll!NtDelayExecution``` to delay the execution of the beacon.
+This method sets the state of the thread to ```Wait:DelayExecution``` while it waits.
 
-1. If the beacon does not make use of file backed memory, the callstack to NtDelayExecution includes memory regions which can not be associated with a file on disk.
-2. If the beacon uses module stomping, one of the modules in the callstack to NtDelayExecution is modified
+Beacons using this method can be identified by enumerating all threads in state ```Wait:DelayExecution``` which have an abnormal calltrace to ```Ntdll!NtDelayExecution```:
 
-Projects, such as [Threadstackspoofer](https://github.com/mgeeky/ThreadStackSpoofer), hook Sleep to spoof the callstack or to use [another technique to wait between callbacks](https://github.com/waldo-irc/YouMayPasser/blob/master/Lockd/Lockd/Sleep.cpp). Thus, I added two more metrics:
-
-3. Inline Hooks of Sleep can be fingerprinted by enumerating memory areas marked as private (not shared) storing the .text segment of Kernel32. This also applies if the hook is removed temporarily
-4. Since a beacon spends more time waiting for commands than actually executing code, it can be fingerprinted by comparing the fields ```KernelTime``` and ```UserTime``` of ```SYSTEM_THREAD_INFORMATION```. Initially I thought that the time sleeping would count as time spent in Kernelmode, but it turned out the other way. I am not sure why :'P Additionally, both fields increase only after the operator executed some commands with the beacon. Also here, I am not sure why :'P
-
-To decrease false positives, I decided to considerate only processes with loaded **wininet.dll** or **winhttp.dll**. Additionally, I had to ignore jitted processes (.NET) and modifications to **ntdll.dll** which also seems to happen legitimately. Metric three and four are still applied though.
-
-## Examples
+- Unknown/private committed memory in calltrace
+- Stomped Modules in calltrace
 
 Sample non file backed beacon:
 ```
@@ -37,7 +31,7 @@ Sample non file backed beacon:
         [*] Sleep Time: 600s
  ``` 
  
- Sample beacon using module stomping:
+ Sample Beacon using module stomping:
  ```
 [!] Suspicious Process: beacon.exe (5296)
 
@@ -51,19 +45,45 @@ Sample non file backed beacon:
         [*] Suspicious Sleep() found
         [*] Sleep Time: 5s
 ```
-Sample beacon inline hooking sleep
-``` 
-[!] Suspicious Process: ThreadStackSpoofer.exe (4876). Potentially hooked Sleep / Modifies Kernel32.dll
+
+## Foliage
+
+[Foliage](https://github.com/SecIdiot/FOLIAGE/) and it's implementations, such as [AceLdr](https://github.com/kyleavery/AceLdr/), avoid the state ```Wait:DelayExecution``` and additionally encrypt themselves while waiting by queueing a series of APCs to ```Ntdll!NtContinue``` one of which triggers the execution of ```Ntdll!WaitForSingleObject``` to delay the execution. 
+
+This effectively sets the state of the thread to ```Wait:UserRequest```. Simply walking the callstack for unknown/tampered memory regions produces to many false positives in this case.    
+
+The observation here is that a call to ```Ntdll!WaitForSingleObject``` initiated by an APC is abnormal and sufficient to build a detection upon. 
+
+[AceLdr](https://github.com/kyleavery/AceLdr/), can thus be identified by enumerating all threads in state ```Wait:UserRequest``` which have a return address to ```Ntdll!KiUserApcDispatcher``` somewhere on the stack. 
+
+AceLdr:  
 ```
-Identification of generic beaconing behaviour by comparing ```KernelTime``` and ```UserTime```:
-```
-[!] Suspicious Process: ThreadStackSpoofer.exe (4876). Thread 1132 has state DelayExecution and spends 94% of the time in usermode
+* Now enumerating all thread in state wait:UserRequest
+* Found 783 threads, now checking for delays caused by APC
+! Possible Foliage identified in process: 16436
+        * Thread 15768 state Wait:UserRequest seems to be triggered by KiUserApcDispatcher
+* End
 ```
 
-## Misc
+### Waitable Timers and Callbacks
+**This metric does not work for implementations using callbacks of WaitableTimers.** [Ekko](https://github.com/Cracked5pider/Ekko) is not identified. A detection using a similar metric is difficult, as the callbacks return to locations in Ntdll which are not exports and are therefore different depending on the Windows build. 
 
-There are of course many ways to bypass this project. :-)
+Otherwise a metric might be to identify delayed threads which have timer related function in the callstack.
+
+
+## Usage
+
+Requirements: 
+
+- mingw-w64
+
+```bash
+make
+```
+
+Executable does not take any parameters 
 
 ## Credits
-- [forrestorr](https://twitter.com/_forrestorr) for documenting the detection of modified dlls based on shared/private memory areas [link](https://www.forrest-orr.net/post/malicious-memory-artifacts-part-i-dll-hollowing)
+- [Austin Hudson](https://github.com/SecIdiot/) for [Foliage](https://github.com/SecIdiot/FOLIAGE/)
+- [Kyleavery](https://github.com/kyleavery) for [AceLdr](https://github.com/kyleavery/AceLdr/)
 - [waldoirc](https://twitter.com/waldoirc) for general support :-)
