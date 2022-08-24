@@ -1,9 +1,11 @@
 #include "Nt.h"
 
+VOID myCallback(PCBPARAM, BOOLEAN);
 BOOL checkCallstack(LPWSTR, DWORD, DWORD);
 BOOL checkModuleStomping(HANDLE, DWORD64, SIZE_T, PSTR, PBOOL);
-BOOL checkWaitCause(DWORD, DWORD, DWORD64);
+BOOL checkWaitReason(DWORD, DWORD, DWORD64, DWORD64);
 BOOL getExportOffset(LPSTR, PDWORD64);
+BOOL getOffsetCbDispatcher(PDWORD64);
 BOOL getThreadsInState(PTHREAD*, PDWORD, ULONG);
 PSTR toLowerA(PSTR str);
 PWSTR toLowerW(PWSTR str);
@@ -12,7 +14,7 @@ DWORD
 main(int argc, char** argv) {
 
 	DWORD dwNumThreadsDelayExecution = 0, dwNumThreadsWaitUserRequest = 0;
-	DWORD64 dw64OffsetKiUserApcDispatcher = 0;
+	DWORD64 dw64OffsetKiUserApcDispatcher = 0, dw64offsetCbDispatcher = 0;
 	PTHREAD threadsDelayExecution[MAX_CANDIDATES] = { 0x00 }, threadsWaitUserRequest[MAX_CANDIDATES] = { 0x00 }, pCandidate = NULL;
 	BOOL bSuccess = FALSE;
 
@@ -40,7 +42,7 @@ main(int argc, char** argv) {
 		printf("- Error enumerating all delayed threads\n");
 		goto exit;
 	}
-	printf("* Found %d threads, now checking for delays caused by APC\n", dwNumThreadsWaitUserRequest);
+	printf("* Found %d threads, now checking for delays caused by APC or Callbacks of waitable timers\n", dwNumThreadsWaitUserRequest);
 
 	bSuccess = getExportOffset("KiUserApcDispatcher", &dw64OffsetKiUserApcDispatcher);
 	if (bSuccess == FALSE) {
@@ -48,10 +50,16 @@ main(int argc, char** argv) {
 		goto exit;
 	}
 
+	bSuccess = getOffsetCbDispatcher(&dw64offsetCbDispatcher);
+	if (bSuccess == FALSE) {
+		printf("- Failed to find callback dispatcher\n");
+		goto exit;
+	}
+
 	for (DWORD dwIdx = 0; dwIdx < dwNumThreadsWaitUserRequest && threadsWaitUserRequest[dwIdx] != NULL; dwIdx++) {
 
 		pCandidate = threadsWaitUserRequest[dwIdx];
-		checkWaitCause(pCandidate->dwPid, pCandidate->dwTid, dw64OffsetKiUserApcDispatcher);
+		checkWaitReason(pCandidate->dwPid, pCandidate->dwTid, dw64OffsetKiUserApcDispatcher, dw64offsetCbDispatcher);
 
 	}
 
@@ -66,14 +74,14 @@ exit:
 }
 
 
-BOOL checkWaitCause(DWORD pid, DWORD tid, DWORD64 offsetDispatcher) {
+BOOL checkWaitReason(DWORD pid, DWORD tid, DWORD64 offsetAPCDispatcher, DWORD64 offsetCbDispatcher) {
 
 	BOOLEAN bSuccess = FALSE;
 	DWORD cbNeeded = 0, idx = 0;
 	DWORD64 stackAddr = 0;
 	SIZE_T numRead = 0;
 	HANDLE hProcess = NULL, hThread = NULL;
-	PVOID readAddr = NULL, pRemoteApcDispatcher = NULL;
+	PVOID readAddr = NULL, pRemoteApcDispatcher = NULL, pRemoteCbDispatcher = NULL;
 
 	CONTEXT context = { 0 };
 	HMODULE modules[128] = { 0 }, hNtdll = NULL;
@@ -98,7 +106,8 @@ BOOL checkWaitCause(DWORD pid, DWORD tid, DWORD64 offsetDispatcher) {
 		if (GetModuleFileNameExA(hProcess, modules[i], szModName, sizeof(szModName))) {
 			if (lstrcmpA("c:\\windows\\system32\\ntdll.dll", toLowerA(szModName)) == 0) {
 				hNtdll = modules[i];
-				pRemoteApcDispatcher = (PBYTE)((DWORD64)hNtdll + (DWORD64)offsetDispatcher);
+				pRemoteApcDispatcher = (PBYTE)((DWORD64)hNtdll + (DWORD64)offsetAPCDispatcher);
+				pRemoteCbDispatcher = (PBYTE)((DWORD64)hNtdll + (DWORD64)offsetCbDispatcher);
 				break;
 			}
 		}
@@ -117,7 +126,7 @@ BOOL checkWaitCause(DWORD pid, DWORD tid, DWORD64 offsetDispatcher) {
 		goto exit;
 	}
 
-	/* Attempts to detect Foliage */
+	/* Attempts to detect Foliage and Ekko/Nighthawk */
 	for (int i = 0; i < 8192; i++) {
 
 		readAddr = (PVOID)((DWORD64)context.Rsp + i * 8);
@@ -129,6 +138,12 @@ BOOL checkWaitCause(DWORD pid, DWORD tid, DWORD64 offsetDispatcher) {
 		if (stackAddr >= (DWORD64)pRemoteApcDispatcher && (DWORD64)((PBYTE)pRemoteApcDispatcher + 120) > stackAddr) {
 			printf("! Possible Foliage identified in process: %d\n", pid);
 			printf("\t* Thread %d state Wait:UserRequest seems to be triggered by KiUserApcDispatcher\n", tid);
+		}
+
+
+		if(stackAddr == (DWORD64)pRemoteCbDispatcher){
+			printf("! Possible Ekko/Nighthawk identified in process: %d\n", pid);
+			printf("\t* Thread %d state Wait:UserRequest seems to be triggered by Callback of waitable Timer\n", tid);
 		}
 
 	}
@@ -480,6 +495,84 @@ BOOL getThreadsInState(PTHREAD* ppThread, PDWORD pdfNumThreads, ULONG waitReason
 	bSuccess = TRUE;
 
 exit:
+	return bSuccess;
+
+}
+
+VOID CALLBACK myCallback(PCBPARAM cbParams, BOOLEAN TimerOrWaitFired) {
+
+	CONTEXT context = { 0 };
+	STACKFRAME64 stackframe = { 0x00 };
+
+	BOOLEAN bSuccess = FALSE;
+
+	RtlCaptureContext(&context);
+
+	stackframe.AddrPC.Offset = context.Rip;
+	stackframe.AddrPC.Mode = AddrModeFlat;
+	stackframe.AddrStack.Offset = context.Rsp;
+	stackframe.AddrStack.Mode = AddrModeFlat;
+	stackframe.AddrFrame.Offset = context.Rbp;
+	stackframe.AddrFrame.Mode = AddrModeFlat;
+
+	SymInitialize(GetCurrentProcess(), NULL, TRUE);
+
+	bSuccess = StackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), GetCurrentThread(), &stackframe, &context, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL);
+	if (bSuccess == FALSE)
+		return;
+	
+	bSuccess = StackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), GetCurrentThread(), &stackframe, &context, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL);
+	if (bSuccess == FALSE)
+		return;
+
+	SymCleanup(GetCurrentProcess());
+
+	cbParams->retDispatcher = (PVOID)stackframe.AddrPC.Offset;
+	SetEvent(cbParams->hEvent);
+
+}
+
+BOOL getOffsetCbDispatcher(PDWORD64 pdw64OffsetCbDispatcher) {
+
+	BOOL bSuccess = FALSE;
+	PVOID retDispatcher = NULL;
+
+	CBPARAM cbParams = { 0 };
+	HANDLE hNewTimer = NULL, hEvent = NULL, hTimerQueue = NULL;
+	HMODULE hNtdll = NULL;
+
+	hEvent = CreateEventW(0, 0, 0, 0);
+	if (hEvent == NULL)
+		return -1;
+
+	hTimerQueue = CreateTimerQueue();
+	if (hTimerQueue == NULL)
+		return -1;
+
+	cbParams.hEvent = hEvent;
+
+	CreateTimerQueueTimer(&hNewTimer, hTimerQueue, (WAITORTIMERCALLBACK)myCallback, &cbParams, 0, 0, WT_EXECUTEINTIMERTHREAD);
+	WaitForSingleObject(cbParams.hEvent, INFINITE);
+
+	hNtdll = GetModuleHandleA("ntdll.dll");
+	if (hNtdll == NULL)
+		goto exit;
+
+	*pdw64OffsetCbDispatcher = (DWORD64)cbParams.retDispatcher - (DWORD64)hNtdll;
+
+	bSuccess = TRUE;
+
+exit:
+
+	if (hNewTimer)
+		CloseHandle(hNewTimer);
+
+	if (hEvent)
+		CloseHandle(hEvent);
+
+	if (hTimerQueue)
+		CloseHandle(hTimerQueue);
+
 	return bSuccess;
 
 }

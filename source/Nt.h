@@ -28,6 +28,13 @@ typedef struct {
 
 } THREAD, *PTHREAD;
 
+typedef struct CBPARAM{
+
+	PVOID retDispatcher;
+	HANDLE hEvent;
+
+}  CBPARAM, * PCBPARAM;
+
 typedef LONG NTSTATUS;
 
 typedef struct {
