@@ -65,11 +65,18 @@ AceLdr:
 * End
 ```
 
-### Waitable Timers and Callbacks
-**This metric does not work for implementations using callbacks of WaitableTimers.** [Ekko](https://github.com/Cracked5pider/Ekko) is not identified. A detection using a similar metric is difficult, as the callbacks return to locations in Ntdll which are not exports and are therefore different depending on the Windows build. 
+## Waitable Timers Callbacks
 
-Otherwise a metric might be to identify delayed threads which have timer related function in the callstack.
+The detection of sleep encryption methods using waitable timers like [Ekko](https://github.com/Cracked5pider/Ekko) is almost the same.
+[MSDN](https://docs.microsoft.com/en-us/windows/win32/api/threadpoollegacyapiset/nf-threadpoollegacyapiset-createtimerqueuetimer) explicitly states that timer callbacks should not be blocking, however the sleep encryption does exactly that. 
 
+In this project, I first locate the dispatcher of callbacks in ntdll.dll by queueing my own timer callback and then use ```RtlCaptureContext``` to be able to walk my own stack. Then, threads in state ```wait:userRequest``` are enumerated and checked for a return address to the dispatcher.
+
+Ekko:
+```
+! Possible Ekko/Nighthawk identified in process: 3996
+        * Thread 14756 state Wait:UserRequest seems to be triggered by Callback of waitable Timer
+```
 
 ## Usage
 
