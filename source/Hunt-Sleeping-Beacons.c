@@ -9,6 +9,8 @@ BOOL getOffsetCbDispatcher(PDWORD64);
 BOOL getThreadsInState(PTHREAD*, PDWORD, ULONG);
 PSTR toLowerA(PSTR str);
 PWSTR toLowerW(PWSTR str);
+BOOL SetDebugPrivilege();
+BOOL IsElevated();
 
 DWORD
 main(int argc, char** argv) {
@@ -20,7 +22,13 @@ main(int argc, char** argv) {
 
 	printf("* Hunt-Sleeping-Beacons\n");
 	printf("* Checking for threads in state wait:DelayExecution\n");
-
+	
+	if (!IsElevated()){
+                printf("- You need elevated rights to run Hunt Sleeping Beacons\n");
+                goto exit;
+        }
+        SetDebugPrivilege();
+	
 	bSuccess = getThreadsInState((PTHREAD*)&threadsDelayExecution, &dwNumThreadsDelayExecution, DelayExecution);
 	if (bSuccess == FALSE) {
 		printf("- Error enumerating threads with state: Wait:DelayExecution\n");
@@ -73,6 +81,48 @@ exit:
 
 }
 
+//https://github.com/outflanknl/Dumpert/blob/master/Dumpert/Outflank-Dumpert/Dumpert.c Is Elevated() and SetDebugPrivilege was stolen from here :).
+BOOL IsElevated() {
+        BOOL fRet = FALSE;
+        HANDLE hToken = NULL;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+                TOKEN_ELEVATION Elevation = { 0 };
+                DWORD cbSize = sizeof(TOKEN_ELEVATION);
+                if (GetTokenInformation(hToken, TokenElevation, &Elevation, sizeof(Elevation), &cbSize)) {
+                        fRet = Elevation.TokenIsElevated;
+                }
+        }
+        if (hToken) {
+                CloseHandle(hToken);
+        }
+        return fRet;
+}
+
+BOOL SetDebugPrivilege() {
+        HANDLE hToken = NULL;
+        TOKEN_PRIVILEGES TokenPrivileges = { 0 };
+
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken)) {
+                return FALSE;
+        }
+
+        TokenPrivileges.PrivilegeCount = 1;
+        TokenPrivileges.Privileges[0].Attributes = TRUE ? SE_PRIVILEGE_ENABLED : 0;
+
+        LPWSTR lpwPriv = L"SeDebugPrivilege";
+        if (!LookupPrivilegeValueW(NULL, (LPCWSTR)lpwPriv, &TokenPrivileges.Privileges[0].Luid)) {
+                CloseHandle(hToken);
+                return FALSE;
+        }
+
+        if (!AdjustTokenPrivileges(hToken, FALSE, &TokenPrivileges, sizeof(TOKEN_PRIVILEGES), NULL, NULL)) {
+                CloseHandle(hToken);
+                return FALSE;
+        }
+
+        CloseHandle(hToken);
+        return TRUE;
+}
 
 BOOL checkWaitReason(DWORD pid, DWORD tid, DWORD64 offsetAPCDispatcher, DWORD64 offsetCbDispatcher) {
 
