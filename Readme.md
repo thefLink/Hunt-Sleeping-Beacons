@@ -1,96 +1,82 @@
 # Hunt-Sleeping-Beacons
 
-The idea of this project is to identify beacons which are **unpacked at runtime or running in the context of an other process**.    
+This project is ( mostly ) a callstack scanner which tries to identify IOCs indicating an unpacked or injected C2 agent.  
 
-All metrics applied are based on the observation that beacons tend to wait between their callbacks and this project aims to identify abnormal behaviour which caused the delay.
+All checks are based on the observation that C2 agents wait between their callbacks causing the beacons thread to idle and this tool aims to analyze what potentially caused the thread to idle.
 
-## DelayExecution
+This includes traditional IOCs, such as unbacked memory or stomped modules, but also attempts to detect multiple implementation of sleepmasks using APCs or Timers. The latter is done by both: analyzing the callstack but also **enumerating timers and their exact callbacks from userland**.
 
-Most C2 agents tend to call ```Kernel32!Sleep``` which in turn calls ```Ntdll!NtDelayExecution``` to delay the execution of the beacon.
-This method sets the state of the thread to ```Wait:DelayExecution``` while it waits.
+(Almost) none of those IOCs can be considered a 100% true positive, the module stomping detection e.g. is very prone to false positives. Yet, the results might raise suspicion about the behaviour of a process.
 
-Beacons using this method can be identified by enumerating all threads in state ```Wait:DelayExecution``` which have an abnormal calltrace to ```Ntdll!NtDelayExecution```:
+DotNet and 32Bit binaries are ignored.
 
-- Unknown/private committed memory in calltrace
-- Stomped Modules in calltrace
+![x](screenshots/1.png?raw=true)
 
-Sample non file backed beacon:
+## Checks
+
+### Unbacked Memory 
+
+A private r(w)x page in a callstack might indicate a beacon which was unpacked or injected at runtime. 
+
+### Non-Executable Memory
+
+Multiple Sleepmasks change the page permissions of the beacon's page to non-executable. This leads to a suspicious non-executable page in the callstack. 
+
+### Module Stomping
+
+Often, beacons avoid private memory pages by loading and overwriting a legitimate module from disk.
+Thanks to the ``copy on write`` mechanism, manipulated images can be identified by checking the field ``VirtualAttributes.SharedOriginal`` of ``MEMORY_WORKING_SET_EX_INFORMATION``. If any page in the callstack is not private and ``SharedOriginal == 0``, it is considered an IOC.
+
+This is probably the detection the most prone to false positives. :'(
+
+### Suspicious APC
+
+Multiple implementations of sleepmasks queue a series of APCs to ``Ntdll!NtContinue`` one of which triggers the execution of ``Ntdll!WaitForSingleObject``. Thus, if ``Ntdll!KiUserApcDispatcher`` can be found on the callstack to a blocking function, this tool considers it an IOC. 
+
+### Suspicious Timers
+
+Similar to the suspicious usage of APCs, this tool also checks for ``ntdll!RtlpTpTimerCallback`` on the callstack to a blocking function to detect timer-based sleepmasks. 
+### Enumerating Timers and Callbacks
+
+To my understanding, Timers are implemented on top of ThreadPools. As [Alon Leviev has demonstrated](https://github.com/SafeBreach-Labs/PoolParty) those can be enumerated using ``NtQueryInformationWorkerFactory`` with ``WorkerFactoryBasicInformation``.    
+
+The ``WORKER_FACTORY_BASIC_INFORMATION`` struct embeds a ``FULL_TP_POOL`` which in turn links to a ``TimerQueue`` double linked list. Traversing that list of ``PFULL_TP_TIMER`` allows accessing each registered callback. If any callback is found pointing to a set of suspicious api calls, such as ``ntdll!ntcontinue``, it can be considered a strong IOC.
+
+![x](screenshots/2.png?raw=true)
+
+### Abnormal Intermodular Calls ( Module Proxying )
+
+Originally module proxying was introduced as a method to [bypass suspicious callstacks](https://0xdarkvortex.dev/proxying-dll-loads-for-hiding-etwti-stack-tracing/).
+While the bypass works, it introduces an other strong IOC, as the NTAPI is used to call the WINAPI. This is odd, as WINAPI is an abstraction for NTAPI. Thus, if a callstack is observed in which a sequence of ntdll.dll->kernel32.dll->ntdll.dll is found ending up calling a blocking function it can be considered an IOC.
+
+### Return Address Spoofing
+
+Most Returnaddress spoofing implementations I am aware of make use of a technique in which the called function returns to a ``jmp [Nonvolatile-Register]`` gadget. This project simply iterates every return address in callstacks and searches for patterns indicating the return to a jmp gadget.
+
+![x](screenshots/3.png?raw=true)
+
+# Usage
+
 ```
-[!] Suspicious Process: PhantomDllHollower.exe
+ _   _    _____   ______
+| | | |  /  ___|  | ___ \
+| |_| |  \ `--.   | |_/ /
+|  _  |   `--. \  | ___ \
+| | | |  /\__/ /  | |_/ /
+\_| |_/  \____/   \____/
 
-        [*] Thread (9192) has State: DelayExecution and abnormal calltrace:
+Hunt-Sleeping-Beacons | @thefLinkk
 
-                NtDelayExecution -> C:\WINDOWS\SYSTEM32\ntdll.dll
-                SleepEx -> C:\WINDOWS\System32\KERNELBASE.dll
-                0x00007FF8C13A103F -> Unknown or modified module
-                0x000001E3C3F48FD0 -> Unknown or modified module
-                0x00007FF700000000 -> Unknown or modified module
-                0x00007FF7C00000BB -> Unknown or modified module
+-p / --pid {PID}
 
-        [*] Suspicious Sleep() found
-        [*] Sleep Time: 600s
- ``` 
- 
- Sample Beacon using module stomping:
- ```
-[!] Suspicious Process: beacon.exe (5296)
-
-        [*] Thread (2968) has State: DelayExecution and uses potentially stomped module
-        [*] Potentially stomped module: C:\Windows\SYSTEM32\xpsservices.dll
-
-                NtDelayExecution -> C:\Windows\SYSTEM32\ntdll.dll
-                SleepEx -> C:\Windows\System32\KERNELBASE.dll
-                DllGetClassObject -> C:\Windows\SYSTEM32\xpsservices.dll
-
-        [*] Suspicious Sleep() found
-        [*] Sleep Time: 5s
-```
-
-## Foliage
-
-[Foliage](https://github.com/SecIdiot/FOLIAGE/) and it's implementations, such as [AceLdr](https://github.com/kyleavery/AceLdr/), avoid the state ```Wait:DelayExecution``` and additionally encrypt themselves while waiting by queueing a series of APCs to ```Ntdll!NtContinue``` one of which triggers the execution of ```Ntdll!WaitForSingleObject``` to delay the execution. 
-
-This effectively sets the state of the thread to ```Wait:UserRequest```. Simply walking the callstack for unknown/tampered memory regions produces to many false positives in this case.    
-
-The observation here is that a call to ```Ntdll!WaitForSingleObject``` initiated by an APC is abnormal and sufficient to build a detection upon. 
-
-[AceLdr](https://github.com/kyleavery/AceLdr/), can thus be identified by enumerating all threads in state ```Wait:UserRequest``` which have a return address to ```Ntdll!KiUserApcDispatcher``` somewhere on the stack. 
-
-AceLdr:  
-```
-* Now enumerating all thread in state wait:UserRequest
-* Found 783 threads, now checking for delays caused by APC
-! Possible Foliage identified in process: 16436
-        * Thread 15768 state Wait:UserRequest seems to be triggered by KiUserApcDispatcher
-* End
-```
-
-## Waitable Timers Callbacks
-
-The detection of sleep encryption methods using waitable timers like [Ekko](https://github.com/Cracked5pider/Ekko) is almost the same.
-[MSDN](https://docs.microsoft.com/en-us/windows/win32/api/threadpoollegacyapiset/nf-threadpoollegacyapiset-createtimerqueuetimer) explicitly states that timer callbacks should not be blocking, however the sleep encryption does exactly that. 
-
-In this project, I first locate the dispatcher of callbacks in ntdll.dll by queueing my own timer callback and then use ```RtlCaptureContext``` to be able to walk my own stack. Then, threads in state ```wait:userRequest``` are enumerated and checked for a return address to the dispatcher.
-
-Ekko:
-```
-! Possible Ekko/Nighthawk identified in process: 3996
-        * Thread 14756 state Wait:UserRequest seems to be triggered by Callback of waitable Timer
+--dotnet | Set to also include dotnet processes. ( Prone to false positivies )
+--stackspoofing | Enables a check to detect stackspoofing
+--commandline | Enables output of cmdline for suspicious processes
+-h / --help | Prints this message?
 ```
 
-## Usage
+# Credits
 
-Requirements: 
-
-- mingw-w64
-
-```bash
-make
-```
-
-Executable does not take any parameters 
-
-## Credits
-- [Austin Hudson](https://github.com/SecIdiot/) for [Foliage](https://github.com/SecIdiot/FOLIAGE/)
-- [Kyleavery](https://github.com/kyleavery) for [AceLdr](https://github.com/kyleavery/AceLdr/)
-- [waldoirc](https://twitter.com/waldoirc) for general support :-)
+- https://urien.gitbook.io/diago-lima/a-deep-dive-into-exploiting-windows-thread-pools/attacking-timer-queues
+- https://github.com/mrexodia/phnt-single-header
+- https://github.com/SafeBreach-Labs/PoolParty

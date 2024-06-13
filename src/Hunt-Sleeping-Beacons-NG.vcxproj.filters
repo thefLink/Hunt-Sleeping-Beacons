@@ -1,0 +1,105 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Source Files\Checks">
+      <UniqueIdentifier>{04cc2909-d8d3-4e2c-8324-f5cd540b03e2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Checks\ThreadChecks">
+      <UniqueIdentifier>{19440fbd-315d-452c-bceb-863c93253098}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Checks\ProcessChecks">
+      <UniqueIdentifier>{660fd97c-6924-49b4-bb92-a8cbfd777ad8}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="EnumTools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="StackTools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Candidate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ProcessTools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MemTools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="TokenTools.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SuspiciousWaitableTimers.cpp">
+      <Filter>Source Files\Checks\ThreadChecks</Filter>
+    </ClCompile>
+    <ClCompile Include="AbnormalIntermodularCall.cpp">
+      <Filter>Source Files\Checks\ThreadChecks</Filter>
+    </ClCompile>
+    <ClCompile Include="CallstackContainsSuspiciousPage.cpp">
+      <Filter>Source Files\Checks\ThreadChecks</Filter>
+    </ClCompile>
+    <ClCompile Include="CallstackContainsStompedModules.cpp">
+      <Filter>Source Files\Checks\ThreadChecks</Filter>
+    </ClCompile>
+    <ClCompile Include="ReturnAddressSpoofing.cpp">
+      <Filter>Source Files\Checks\ThreadChecks</Filter>
+    </ClCompile>
+    <ClCompile Include="SuspiciousAPC.cpp">
+      <Filter>Source Files\Checks\ThreadChecks</Filter>
+    </ClCompile>
+    <ClCompile Include="EnumerateSuspiciousTimers.cpp">
+      <Filter>Source Files\Checks\ProcessChecks</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="EnumTools.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Hunt-Sleeping-Beacons.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="StackTools.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Check.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Candidate.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ProcessTools.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MemTools.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TokenTools.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Detection.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Phnt.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TPDefs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
