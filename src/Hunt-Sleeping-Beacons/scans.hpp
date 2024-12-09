@@ -35,6 +35,7 @@ namespace hsb::scanning {
 		static thread_scan abnormal_intermodular_call;
 		static thread_scan return_address_spoofing;
 		static thread_scan hardware_breakpoints;
+		static thread_scan non_executable_memory;
 
 	};
 

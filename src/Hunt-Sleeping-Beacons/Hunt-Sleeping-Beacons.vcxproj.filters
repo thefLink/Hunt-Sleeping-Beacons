@@ -54,6 +54,9 @@
     <ClCompile Include="suspicious_timer.cpp">
       <Filter>Header Files\scanning\scans</Filter>
     </ClCompile>
+    <ClCompile Include="non_executable_memory.cpp">
+      <Filter>Header Files\scanning\scans</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="detection.hpp">

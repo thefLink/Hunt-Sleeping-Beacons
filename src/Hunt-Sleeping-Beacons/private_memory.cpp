@@ -10,7 +10,6 @@ namespace hsb::scanning {
 	thread_scan thread_scans::private_memory = [](process* process, thread* thread) {
 
 		BOOL bSuspicious = FALSE, bSuccess = FALSE;
-		char message[512] = { 0 };
 
 		for (std::string module : thread->calltrace->modules) {
 

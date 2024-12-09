@@ -50,6 +50,7 @@ namespace hsb::scanning {
 		thread_scans_.push_back(thread_scans::private_memory);
 		thread_scans_.push_back(thread_scans::stomped_module);
 		thread_scans_.push_back(thread_scans::hardware_breakpoints);
+		thread_scans_.push_back(thread_scans::non_executable_memory);
 
 	}
 	process_scanner::~process_scanner() {}

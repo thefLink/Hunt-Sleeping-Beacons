@@ -12,6 +12,7 @@
 #include "private_memory.cpp"
 #include "return_address_spoofing.cpp"
 #include "stomped_module.cpp"
+#include "non_executable_memory.cpp"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace hsb;
@@ -230,6 +231,23 @@ namespace HSBUnittests
 
 			for(auto& thread : processes[0]->threads) {
 				hsb::scanning::thread_scans::stomped_module(processes[0].get(),thread.get());
+			}
+
+			Assert::AreNotEqual((int)processes[0]->detections.size(),0);
+		}
+
+		TEST_METHOD(non_executable_memory)
+		{
+
+			process_enumerator process_enumerator((uint16_t)GetCurrentProcessId(),false);
+			process_scanner process_scanner;
+			std::vector<std::unique_ptr<process>> processes;
+
+			processes = process_enumerator.enumerate_processes();
+			Assert::AreEqual((int)processes.size(),1);
+
+			for(auto& thread : processes[0]->threads) {
+				hsb::scanning::thread_scans::non_executable_memory(processes[0].get(),thread.get());
 			}
 
 			Assert::AreNotEqual((int)processes[0]->detections.size(),0);
