@@ -10,7 +10,7 @@ This includes traditional IOCs, such as unbacked memory or stomped modules, but 
 
 DotNet and 32Bit binaries are ignored.
 
-![x](screenshots/1.png?raw=true)
+![x](res/1.png?raw=true)
 
 ## Checks
 
@@ -42,7 +42,7 @@ To my understanding, Timers are implemented on top of ThreadPools. As [Alon Levi
 
 The ``WORKER_FACTORY_BASIC_INFORMATION`` struct embeds a ``FULL_TP_POOL`` which in turn links to a ``TimerQueue`` double linked list. Traversing that list of ``PFULL_TP_TIMER`` allows accessing each registered callback. If any callback is found pointing to a set of suspicious api calls, such as ``ntdll!ntcontinue``, it can be considered a strong IOC.
 
-![x](screenshots/2.png?raw=true)
+![x](res/2.png?raw=true)
 
 ### Abnormal Intermodular Calls ( Module Proxying )
 
@@ -53,7 +53,7 @@ While the bypass works, it introduces an other strong IOC, as the NTAPI is used 
 
 Most Returnaddress spoofing implementations I am aware of make use of a technique in which the called function returns to a ``jmp [Nonvolatile-Register]`` gadget. This project simply iterates every return address in callstacks and searches for patterns indicating the return to a jmp gadget.
 
-![x](screenshots/3.png?raw=true)
+![x](res/3.png?raw=true)
 
 # Usage
 
@@ -70,7 +70,6 @@ Hunt-Sleeping-Beacons | @thefLinkk
 -p / --pid {PID}
 
 --dotnet | Set to also include dotnet processes. ( Prone to false positivies )
---stackspoofing | Enables a check to detect stackspoofing
 --commandline | Enables output of cmdline for suspicious processes
 -h / --help | Prints this message?
 ```
@@ -80,3 +79,4 @@ Hunt-Sleeping-Beacons | @thefLinkk
 - https://urien.gitbook.io/diago-lima/a-deep-dive-into-exploiting-windows-thread-pools/attacking-timer-queues
 - https://github.com/mrexodia/phnt-single-header
 - https://github.com/SafeBreach-Labs/PoolParty
+- https://github.com/bshoshany/thread-pool
